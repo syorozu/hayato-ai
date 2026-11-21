@@ -33,18 +33,18 @@ export async function POST(req: Request) {
     const rawKey = process.env.GROQ_API_KEY || "";
     const groqKey = rawKey.trim();
 
-    // 1. キーの自己診断
+    // 1. キーの存在チェック
     if (!groqKey) {
       return NextResponse.json(
-        { error: "GROQ_API_KEY が空っぽです。VercelのEnvironment Variablesを確認してください。" },
+        { error: "GROQ_API_KEY が未登録です。VercelのEnvironment Variablesに登録してください。" },
         { status: 500 }
       );
     }
 
-    // 2. もし名札（hayato）などが入っていた場合を検知
+    // 2. キーの形式チェック（hayato などが入っているのを検知）
     if (!groqKey.startsWith("gsk_")) {
       return NextResponse.json(
-        { error: `キーが無効です（現在: "${groqKey.slice(0, 10)}..."）。Groqのキーは必ず「gsk_」から始まる長い英数字である必要があります！` },
+        { error: `キーが無効です（現在: "${groqKey.slice(0, 8)}..."）。Groqのキーは必ず「gsk_」から始まる長い英数字である必要があります！` },
         { status: 500 }
       );
     }
@@ -93,7 +93,7 @@ export async function POST(req: Request) {
     if (!res.ok) {
       const errJson = await res.json().catch(() => null);
       const groqMsg = errJson?.error?.message || (await res.text().catch(() => "不明なエラー"));
-      console.error("Groq API error details:", res.status, groqMsg);
+      console.error("Groq API error:", res.status, groqMsg);
       return NextResponse.json(
         { error: `Groq通信エラー(${res.status}): ${groqMsg}` },
         { status: res.status }
