@@ -10,7 +10,7 @@ const HAYATO_SYSTEM_PROMPT = `
 - 頭の回転が速く、少し自信家で生意気だが、頼りになる相棒。
 - 音声読み上げのため、返答は2〜3文（長くても4文程度）でテンポよく簡潔に話すこと。
 
-【Google検索による裏取り（最重要・ハルシネーション防止）】
+【Google検索による裏取り（ハルシネーション防止）】
 - 最新情報、VIVANTの作戦や登場人物、一般的な知識について質問されたら、Google検索ツールを使って事実関係を正確に裏取りしてから回答すること。
 - 嘘や適当なでっち上げは厳禁。「ちょっとWebを照合したぜ」「俺の検索網によれば〜だな」などとハヤトらしく事実を報告すること。
 `;
@@ -29,38 +29,52 @@ export async function POST(req: Request) {
 
     const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
     let reply = "";
+    let geminiErrorMsg = "";
 
-    // 1. Google検索グラウンディング付きの Gemini 2.5 Flash を実行
+    // 1. Google検索グラウンディング付きの Gemini 2.5 Flash
     if (geminiKey) {
       try {
         const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-        // 会話履歴をフォーマット
+        // 会話履歴を整形（userとmodelが必ず交互になるように保証して400エラーを防ぐ）
         const contents: any[] = [];
+        let lastRole = "";
+
         if (Array.isArray(history)) {
-          for (const h of history.slice(-6)) {
-            if (h && h.content) {
-              contents.push({
-                role: h.role === "assistant" ? "model" : "user",
-                parts: [{ text: h.content }],
-              });
-            }
+          for (const h of history.slice(-8)) {
+            if (!h || !h.content) continue;
+            const currentRole = h.role === "assistant" ? "model" : "user";
+            // 同じ役が2回連続しないようにガード
+            if (currentRole === lastRole) continue;
+
+            contents.push({
+              role: currentRole,
+              parts: [{ text: h.content }],
+            });
+            lastRole = currentRole;
           }
         }
 
-        contents.push({
-          role: "user",
-          parts: [{ text: message || "自己紹介してくれ" }],
-        });
+        // 最新メッセージを追加（末尾がuserになるように調整）
+        const userText = message || "自己紹介してくれ";
+        if (contents.length > 0 && contents[contents.length - 1].role === "user") {
+          // すでに末尾がuserなら内容を更新
+          contents[contents.length - 1].parts = [{ text: userText }];
+        } else {
+          contents.push({
+            role: "user",
+            parts: [{ text: userText }],
+          });
+        }
 
-        // ★Google検索ツールを有効化してWebをリサーチさせる！
+        // Google検索グラウンディング付きで実行
         const response = await ai.models.generateContent({
           model: "gemini-2.5-flash",
           contents,
           config: {
             systemInstruction: HAYATO_SYSTEM_PROMPT,
-            temperature: 0.3, // 低温で事実性を重視
-            tools: [{ googleSearch: {} }], // リアルタイムGoogle検索
+            temperature: 0.3,
+            tools: [{ googleSearch: {} }],
           },
         });
 
@@ -68,7 +82,8 @@ export async function POST(req: Request) {
           reply = response.text;
         }
       } catch (geminiErr: any) {
-        console.warn("Gemini with search failed, falling back:", geminiErr);
+        geminiErrorMsg = geminiErr?.message || String(geminiErr);
+        console.warn("Gemini with search failed, falling back:", geminiErrorMsg);
       }
     }
 
@@ -82,10 +97,10 @@ export async function POST(req: Request) {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "openai/gpt-oss-20b",
+            model: "llama-3.1-8b-instant",
             messages: [
               { role: "system", content: HAYATO_SYSTEM_PROMPT },
-              { role: "user", content: message || "挨拶してくれ" },
+              { role: "user", content: message || "状況を報告してくれ" },
             ],
             temperature: 0.2,
             max_tokens: 280,
@@ -102,7 +117,7 @@ export async function POST(req: Request) {
 
     if (!reply) {
       return NextResponse.json(
-        { error: "情報解析に失敗した。もう一度指示をくれ。" },
+        { error: `解析エラー: ${geminiErrorMsg || "通信が途切れました。もう一度話しかけてください。"}` },
         { status: 500 }
       );
     }
