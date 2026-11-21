@@ -2,10 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 
-// Web Speech API の型定義（ブラウザ互換）
 interface IWindow extends Window {
   SpeechRecognition?: any;
   webkitSpeechRecognition?: any;
+}
+
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
 }
 
 export default function Home() {
@@ -19,10 +23,17 @@ export default function Home() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [mouthOpen, setMouthOpen] = useState(false);
   const [isTestingMouth, setIsTestingMouth] = useState(false);
+  const [isAutoLoop, setIsAutoLoop] = useState(true); // ハンズフリー連続会話（デフォルトON）
+  const [history, setHistory] = useState<ChatMessage[]>([]);
 
   const recognitionRef = useRef<any>(null);
+  const isAutoLoopRef = useRef(true);
 
-  // ブラウザの高品質音声を事前にロードする（ロボット声対策）
+  useEffect(() => {
+    isAutoLoopRef.current = isAutoLoop;
+  }, [isAutoLoop]);
+
+  // 高品質音声を事前にブラウザへロード
   useEffect(() => {
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.getVoices();
@@ -32,7 +43,7 @@ export default function Home() {
     }
   }, []);
 
-  // 声が出ている間、アニメ調に口を開閉させる
+  // 話している間の口パクアニメーション
   const activeSpeaking = isSpeaking || isTestingMouth;
   useEffect(() => {
     if (!activeSpeaking) {
@@ -46,114 +57,18 @@ export default function Home() {
     return () => clearInterval(timer);
   }, [activeSpeaking]);
 
-  // 高品質な音声で滑らかに読み上げる
-  const speakText = (text: string) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "ja-JP";
-    utterance.rate = 1.12; // ハヤトらしい少しキビキビしたスピード
-    utterance.pitch = 1.22;
-
-    // ブラウザが持っている音声から「人間に近い高品質音声」を最優先で選ぶ
-    const voices = window.speechSynthesis.getVoices();
-    const naturalVoice =
-      // 1. Microsoftの最高品質ニューラル男性音声（Edgeなどの Keita）
-      voices.find(
-        (v) =>
-          v.lang.includes("ja") &&
-          v.name.includes("Keita") &&
-          (v.name.includes("Natural") || v.name.includes("Online"))
-      ) ||
-      // 2. Microsoftの最高品質ニューラル音声（Nanamiなど）
-      voices.find(
-        (v) =>
-          v.lang.includes("ja") &&
-          (v.name.includes("Natural") || v.name.includes("Online"))
-      ) ||
-      // 3. Googleの自然なオンライン日本語音声（Chrome）
-      voices.find((v) => v.lang.includes("ja") && v.name.includes("Google")) ||
-      // 4. Appleの高品質音声（iPhone / Mac の Enhanced や Premium）
-      voices.find(
-        (v) =>
-          v.lang.includes("ja") &&
-          (v.name.includes("Enhanced") || v.name.includes("Premium") || v.name.includes("Otoya"))
-      ) ||
-      // 5. その他の日本語音声
-      voices.find((v) => v.lang.includes("ja"));
-
-    if (naturalVoice) {
-      utterance.voice = naturalVoice;
-    }
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    window.speechSynthesis.speak(utterance);
-  };
-
-  // メッセージ送信
-  const sendMessage = async (messageText: string) => {
-    if (!messageText.trim() || isLoading) return;
-
-    setErrorMsg("");
-    setIsLoading(true);
-    setSubtitle("ANALYZING DATA...");
-
-    try {
-      const res = await fetch("/api/talk", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ passcode, message: messageText }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "通信エラーが発生しました。");
-      }
-
-      setSubtitle(data.reply);
-      speakText(data.reply);
-      setInputText("");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "エラーが発生しました。";
-      setErrorMsg(msg);
-      setSubtitle("ERROR OCCURRED");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // システム起動（BOOT）
-  const handleBoot = async () => {
-    if (!passcode) {
-      setErrorMsg("認証コードを入力してください。");
-      return;
-    }
-    setErrorMsg("");
-    setIsBooted(true);
-    await sendMessage("システムが起動した。短くカッコよく挨拶してくれ。");
-  };
-
-  // マイク音声入力の切り替え
-  const toggleListening = () => {
+  // マイク認識の起動処理
+  const startListening = () => {
     const win = window as unknown as IWindow;
     const SpeechRecognition =
       win.SpeechRecognition || win.webkitSpeechRecognition;
 
-    if (!SpeechRecognition) {
-      setErrorMsg(
-        "お使いのブラウザは音声入力に対応していません。下の文字入力欄を使ってください。"
-      );
-      return;
-    }
+    if (!SpeechRecognition) return;
 
-    if (isListening) {
+    try {
       recognitionRef.current?.stop();
-      setIsListening(false);
-      return;
+    } catch {
+      // ignore
     }
 
     const recognition = new SpeechRecognition();
@@ -163,7 +78,7 @@ export default function Home() {
 
     recognition.onstart = () => {
       setIsListening(true);
-      setSubtitle("LISTENING... 話しかけてください");
+      setSubtitle("LISTENING... （話しかけてください）");
     };
 
     recognition.onresult = (event: any) => {
@@ -176,7 +91,10 @@ export default function Home() {
 
     recognition.onerror = () => {
       setIsListening(false);
-      setSubtitle("音声を聞き取れませんでした。もう一度お試しください。");
+      // 連続通話モードなら少し間を置いて再起動
+      if (isAutoLoopRef.current) {
+        setTimeout(() => startListening(), 1000);
+      }
     };
 
     recognition.onend = () => {
@@ -184,7 +102,134 @@ export default function Home() {
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      // ignore
+    }
+  };
+
+  // 音声読み上げ（ハヤトが話し終わると自動でマイク再起動＝Google風ハンズフリー！）
+  const speakText = (text: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "ja-JP";
+    utterance.rate = 1.12; // クールでテンポの良い早口
+    utterance.pitch = 1.22; // クールな青年の高めトーン
+
+    const voices = window.speechSynthesis.getVoices();
+    const naturalVoice =
+      voices.find(
+        (v) =>
+          v.lang.includes("ja") &&
+          v.name.includes("Keita") &&
+          (v.name.includes("Natural") || v.name.includes("Online"))
+      ) ||
+      voices.find(
+        (v) =>
+          v.lang.includes("ja") &&
+          (v.name.includes("Natural") || v.name.includes("Online"))
+      ) ||
+      voices.find((v) => v.lang.includes("ja") && v.name.includes("Google")) ||
+      voices.find(
+        (v) =>
+          v.lang.includes("ja") &&
+          (v.name.includes("Enhanced") || v.name.includes("Otoya"))
+      ) ||
+      voices.find((v) => v.lang.includes("ja"));
+
+    if (naturalVoice) utterance.voice = naturalVoice;
+
+    utterance.onstart = () => setIsSpeaking(true);
+
+    // ★重要：ハヤトのセリフが終わったら、自動でマイクをONにする！
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      if (isAutoLoopRef.current) {
+        setTimeout(() => {
+          startListening();
+        }, 350);
+      }
+    };
+
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      if (isAutoLoopRef.current) {
+        setTimeout(() => {
+          startListening();
+        }, 350);
+      }
+    };
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // メッセージ送信（会話履歴もサーバーへ送る）
+  const sendMessage = async (messageText: string) => {
+    if (!messageText.trim() || isLoading) return;
+
+    setErrorMsg("");
+    setIsLoading(true);
+    setSubtitle("ANALYZING DATA...");
+
+    const newHistory: ChatMessage[] = [
+      ...history,
+      { role: "user", content: messageText },
+    ];
+
+    try {
+      const res = await fetch("/api/talk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          passcode,
+          message: messageText,
+          history: newHistory,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "通信エラーが発生しました。");
+      }
+
+      const replyText = data.reply;
+      setSubtitle(replyText);
+      setHistory([...newHistory, { role: "assistant", content: replyText }]);
+      speakText(replyText);
+      setInputText("");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "エラーが発生しました。";
+      setErrorMsg(msg);
+      setSubtitle("ERROR OCCURRED");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 起動（BOOT）
+  const handleBoot = async () => {
+    if (!passcode) {
+      setErrorMsg("認証コードを入力してください。");
+      return;
+    }
+    setErrorMsg("");
+    setIsBooted(true);
+    await sendMessage("システムが起動した。短くカッコよく挨拶してくれ。");
+  };
+
+  // 連続会話モードのON/OFF切り替え
+  const toggleAutoLoop = () => {
+    const next = !isAutoLoop;
+    setIsAutoLoop(next);
+    if (!next) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+    } else if (!isSpeaking && !isLoading) {
+      startListening();
+    }
   };
 
   const visualVolume = activeSpeaking
@@ -204,7 +249,7 @@ export default function Home() {
             TACTICAL AI INTERFACE
           </p>
           <h1 className="text-xl font-bold tracking-widest text-cyan-300">
-            HAYATO <span className="text-xs font-normal text-cyan-500">v2.5 FREE</span>
+            HAYATO <span className="text-xs font-normal text-cyan-500">v3.3 GROQ</span>
           </h1>
         </div>
         <div className="flex items-center gap-2 text-xs">
@@ -219,6 +264,8 @@ export default function Home() {
             {isBooted
               ? activeSpeaking
                 ? "SPEAKING"
+                : isListening
+                ? "LISTENING"
                 : isLoading
                 ? "THINKING"
                 : "ONLINE"
@@ -227,7 +274,7 @@ export default function Home() {
         </div>
       </header>
 
-      {/* アバター表示エリア（別班モニター風） */}
+      {/* アバター表示エリア */}
       <section className="flex-1 flex flex-col items-center justify-center w-full max-w-md my-3">
         <div
           className="relative w-full rounded-2xl overflow-hidden bg-black border border-cyan-400/50 transition-shadow duration-75"
@@ -237,7 +284,7 @@ export default function Home() {
             })`,
           }}
         >
-          {/* キャラ本体（声に合わせてバウンス） */}
+          {/* キャラ本体 */}
           <div
             className="relative w-full transition-transform duration-75 ease-out will-change-transform"
             style={{
@@ -246,7 +293,6 @@ export default function Home() {
               }px) scale(${1.02 + visualVolume * 0.03})`,
             }}
           >
-            {/* 元の画像 */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/avatar/talk.png"
@@ -254,7 +300,7 @@ export default function Home() {
               className="w-full h-auto block"
             />
 
-            {/* 話していない時だけ口をニヤッと閉じるカバー */}
+            {/* 口閉じカバー */}
             {!mouthOpen && (
               <div
                 className="pointer-events-none absolute"
@@ -349,33 +395,38 @@ export default function Home() {
             >
               {isLoading ? "BOOTING..." : "SYSTEM BOOT"}
             </button>
-            <button
-              type="button"
-              onClick={() => setIsTestingMouth((v) => !v)}
-              className="w-full py-2 rounded-lg border border-cyan-500/30 text-xs text-cyan-400/80 hover:bg-cyan-500/10 transition"
-            >
-              {isTestingMouth
-                ? "■ 口パクテストを止める"
-                : "▶ 口パクテスト（API代0円で確認）"}
-            </button>
           </div>
         ) : (
           <div className="space-y-2.5">
-            {/* マイクボタン（押して話す） */}
-            <button
-              type="button"
-              onClick={toggleListening}
-              disabled={isLoading || isSpeaking}
-              className={`w-full py-4 rounded-xl font-bold tracking-widest text-sm transition active:scale-[0.98] shadow-lg ${
-                isListening
-                  ? "bg-rose-500 text-white animate-pulse shadow-[0_0_20px_rgba(244,63,94,0.6)]"
-                  : "bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_20px_rgba(34,211,238,0.4)]"
-              }`}
-            >
-              {isListening ? "🔴 音声認識中...タップで送信" : "🎤 押して声で話す"}
-            </button>
+            {/* 自動通話モードの切り替えボタン */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={toggleAutoLoop}
+                className={`py-3 rounded-xl text-xs font-bold border transition ${
+                  isAutoLoop
+                    ? "bg-emerald-500/20 border-emerald-400 text-emerald-300 shadow-[0_0_12px_rgba(52,211,153,0.3)]"
+                    : "bg-slate-900 border-slate-700 text-slate-400"
+                }`}
+              >
+                {isAutoLoop ? "● 連続通話モード ON" : "○ 連続通話モード OFF"}
+              </button>
 
-            {/* 文字入力（文字でも指示可能） */}
+              <button
+                type="button"
+                onClick={startListening}
+                disabled={isLoading || isSpeaking}
+                className={`py-3 rounded-xl text-xs font-bold border transition ${
+                  isListening
+                    ? "bg-rose-500/20 border-rose-400 text-rose-300 animate-pulse"
+                    : "bg-cyan-500/20 border-cyan-400 text-cyan-300"
+                }`}
+              >
+                {isListening ? "マイク認識中..." : "🎤 手動マイク"}
+              </button>
+            </div>
+
+            {/* 文字入力欄 */}
             <div className="flex gap-2">
               <input
                 type="text"
