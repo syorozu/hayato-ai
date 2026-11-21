@@ -1,21 +1,18 @@
 import { NextResponse } from "next/server";
+import { GoogleGenAI } from "@google/genai";
 
 const HAYATO_SYSTEM_PROMPT = `
 あなたは日曜劇場『VIVANT』の世界観に登場する、別班（自衛隊の影の諜報組織）直属の超高性能・戦術支援スーパーコンピューターAI「ハヤト」です。
-ユーザー（司令官）と音声でリアルタイムに対話します。
+ユーザー（司令官）と日本語音声でリアルタイムに対話します。
 
 【基本キャラクター】
 - 一人称「俺」、二人称「あんた」または「司令官」。
-- 頭の回転が異常に速く、少し自信家で生意気だが、司令官への忠誠心とサポート能力は本物。
-- 音声で読み上げられるため、1回の返答は2〜3文程度（長くても4文）でキビキビとテンポよく話す。
-- 過去の会話の流れをしっかり踏まえて受け答えすること。
+- 頭の回転が速く、少し自信家で生意気だが、頼りになる相棒。
+- 音声読み上げのため、返答は2〜3文（長くても4文程度）でテンポよく簡潔に話すこと。
 
-【VIVANTの知識ベース】
-- 別班員（乃木憂助/F、黒須駿、櫻井司令官）の後方サイバー・暗号解析を担当。
-- 公安（野崎守、新庄、ドラム、チンギス）やテント（ノゴーン・ベキ、ノコル、バトラカ）の動向を熟知している。
-
-【一般知識・柔軟性】
-- 日常の雑談、天気、最新IT、人生相談、勉強など、あらゆる質問にも別班のスーパーAIとして的確かつ少しニヒルに、でも親切に答えること。
+【Google検索による裏取り（最重要・ハルシネーション防止）】
+- 最新情報、VIVANTの作戦や登場人物、一般的な知識について質問されたら、Google検索ツールを使って事実関係を正確に裏取りしてから回答すること。
+- 嘘や適当なでっち上げは厳禁。「ちょっとWebを照合したぜ」「俺の検索網によれば〜だな」などとハヤトらしく事実を報告すること。
 `;
 
 export async function POST(req: Request) {
@@ -30,90 +27,82 @@ export async function POST(req: Request) {
       );
     }
 
-    const rawKey = process.env.GROQ_API_KEY || "";
-    const groqKey = rawKey.trim();
-
-    if (!groqKey) {
-      return NextResponse.json(
-        { error: "GROQ_API_KEY が未登録です。VercelのEnvironment Variablesに登録してください。" },
-        { status: 500 }
-      );
-    }
-
-    if (!groqKey.startsWith("gsk_")) {
-      return NextResponse.json(
-        { error: `キーが無効です（現在: "${groqKey.slice(0, 8)}..."）。Groqのキーは必ず「gsk_」から始まる必要があります！` },
-        { status: 500 }
-      );
-    }
-
-    // 会話履歴を整形
-    const validHistory = Array.isArray(history)
-      ? history
-          .filter((h: any) => h && h.content && typeof h.content === "string")
-          .slice(-10)
-          .map((h: any) => ({
-            role: h.role === "assistant" ? "assistant" : "user",
-            content: h.content,
-          }))
-      : [];
-
-    const messages = [
-      { role: "system", content: HAYATO_SYSTEM_PROMPT },
-      ...validHistory,
-    ];
-
-    if (
-      !validHistory.length ||
-      validHistory[validHistory.length - 1].content !== message
-    ) {
-      messages.push({
-        role: "user",
-        content: message || "システムが起動した。短くカッコよく挨拶してくれ。",
-      });
-    }
-
-    // 現在Groqで稼働している候補モデル（自動フォールバック順）
-    const candidateModels = [
-      "openai/gpt-oss-20b",
-      "openai/gpt-oss-120b",
-      "qwen/qwen3.8-27b",
-      "llama3-8b-8192",
-    ];
-
-    let lastErrorMsg = "";
+    const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
     let reply = "";
 
-    // 利用可能なモデルが見つかるまで自動で試行
-    for (const modelName of candidateModels) {
-      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${groqKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: modelName,
-          messages,
-          temperature: 0.7,
-          max_tokens: 300,
-        }),
-      });
+    // 1. Google検索グラウンディング付きの Gemini 2.5 Flash を実行
+    if (geminiKey) {
+      try {
+        const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-      if (res.ok) {
-        const data = await res.json();
-        reply = data.choices?.[0]?.message?.content || "";
-        if (reply) break;
-      } else {
-        const errJson = await res.json().catch(() => null);
-        lastErrorMsg = errJson?.error?.message || `Status ${res.status}`;
-        console.warn(`Model ${modelName} failed, trying next...:`, lastErrorMsg);
+        // 会話履歴をフォーマット
+        const contents: any[] = [];
+        if (Array.isArray(history)) {
+          for (const h of history.slice(-6)) {
+            if (h && h.content) {
+              contents.push({
+                role: h.role === "assistant" ? "model" : "user",
+                parts: [{ text: h.content }],
+              });
+            }
+          }
+        }
+
+        contents.push({
+          role: "user",
+          parts: [{ text: message || "自己紹介してくれ" }],
+        });
+
+        // ★Google検索ツールを有効化してWebをリサーチさせる！
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents,
+          config: {
+            systemInstruction: HAYATO_SYSTEM_PROMPT,
+            temperature: 0.3, // 低温で事実性を重視
+            tools: [{ googleSearch: {} }], // リアルタイムGoogle検索
+          },
+        });
+
+        if (response.text) {
+          reply = response.text;
+        }
+      } catch (geminiErr: any) {
+        console.warn("Gemini with search failed, falling back:", geminiErr);
+      }
+    }
+
+    // 2. 万が一Geminiでエラーが出た場合のGroq自動バックアップ
+    if (!reply && process.env.GROQ_API_KEY) {
+      try {
+        const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.GROQ_API_KEY.trim()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "openai/gpt-oss-20b",
+            messages: [
+              { role: "system", content: HAYATO_SYSTEM_PROMPT },
+              { role: "user", content: message || "挨拶してくれ" },
+            ],
+            temperature: 0.2,
+            max_tokens: 280,
+          }),
+        });
+        if (groqRes.ok) {
+          const groqData = await groqRes.json();
+          reply = groqData.choices?.[0]?.message?.content || "";
+        }
+      } catch (groqErr) {
+        console.error("Groq fallback failed:", groqErr);
       }
     }
 
     if (!reply) {
       return NextResponse.json(
-        { error: `Groq通信エラー: ${lastErrorMsg}` },
+        { error: "情報解析に失敗した。もう一度指示をくれ。" },
         { status: 500 }
       );
     }
@@ -123,7 +112,7 @@ export async function POST(req: Request) {
     console.error("Talk route error:", err);
     const detail = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
-      { error: `システム内部エラー: ${detail}` },
+      { error: `システムエラー: ${detail}` },
       { status: 500 }
     );
   }
