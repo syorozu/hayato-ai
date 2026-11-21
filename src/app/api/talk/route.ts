@@ -30,27 +30,52 @@ export async function POST(req: Request) {
       );
     }
 
-    const groqKey = process.env.GROQ_API_KEY;
+    const rawKey = process.env.GROQ_API_KEY || "";
+    const groqKey = rawKey.trim();
+
+    // 1. キーの自己診断
     if (!groqKey) {
       return NextResponse.json(
-        { error: "GROQ_API_KEY が設定されていません。.env.local を確認してください。" },
+        { error: "GROQ_API_KEY が空っぽです。VercelのEnvironment Variablesを確認してください。" },
         { status: 500 }
       );
     }
 
-    // 過去の会話履歴をフォーマット（直近6往復を保持）
-    const messages = [
-      { role: "system", content: HAYATO_SYSTEM_PROMPT },
-      ...(Array.isArray(history)
-        ? history.slice(-12).map((h: { role: string; content: string }) => ({
+    // 2. もし名札（hayato）などが入っていた場合を検知
+    if (!groqKey.startsWith("gsk_")) {
+      return NextResponse.json(
+        { error: `キーが無効です（現在: "${groqKey.slice(0, 10)}..."）。Groqのキーは必ず「gsk_」から始まる長い英数字である必要があります！` },
+        { status: 500 }
+      );
+    }
+
+    // 会話履歴を整形
+    const validHistory = Array.isArray(history)
+      ? history
+          .filter((h: any) => h && h.content && typeof h.content === "string")
+          .slice(-10)
+          .map((h: any) => ({
             role: h.role === "assistant" ? "assistant" : "user",
             content: h.content,
           }))
-        : []),
-      { role: "user", content: message || "システムが起動した。短くカッコよく挨拶してくれ。" },
+      : [];
+
+    const messages = [
+      { role: "system", content: HAYATO_SYSTEM_PROMPT },
+      ...validHistory,
     ];
 
-    // 世界最速・完全無料の Llama 3.3 70B Versatile で思考
+    if (
+      !validHistory.length ||
+      validHistory[validHistory.length - 1].content !== message
+    ) {
+      messages.push({
+        role: "user",
+        content: message || "システムが起動した。短くカッコよく挨拶してくれ。",
+      });
+    }
+
+    // Groq API 呼び出し
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -61,14 +86,18 @@ export async function POST(req: Request) {
         model: "llama-3.3-70b-versatile",
         messages,
         temperature: 0.7,
-        max_tokens: 280,
+        max_tokens: 300,
       }),
     });
 
     if (!res.ok) {
-      const errText = await res.text();
-      console.error("Groq error:", errText);
-      throw new Error("AIサーバーからの応答エラー");
+      const errJson = await res.json().catch(() => null);
+      const groqMsg = errJson?.error?.message || (await res.text().catch(() => "不明なエラー"));
+      console.error("Groq API error details:", res.status, groqMsg);
+      return NextResponse.json(
+        { error: `Groq通信エラー(${res.status}): ${groqMsg}` },
+        { status: res.status }
+      );
     }
 
     const data = await res.json();
@@ -79,8 +108,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ reply });
   } catch (err: unknown) {
     console.error("Talk route error:", err);
+    const detail = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
-      { error: "回線エラーだ。もう一度話しかけてくれ。" },
+      { error: `システム内部エラー: ${detail}` },
       { status: 500 }
     );
   }
