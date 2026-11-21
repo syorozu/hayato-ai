@@ -31,7 +31,7 @@ export async function POST(req: Request) {
     let reply = "";
     let geminiErrorMsg = "";
 
-    // 1. Google検索グラウンディング付きの Gemini 2.5 Flash
+    // 1. Google検索グラウンディング付きの Gemini 3.8 Flash
     if (geminiKey) {
       try {
         const ai = new GoogleGenAI({ apiKey: geminiKey });
@@ -69,7 +69,7 @@ export async function POST(req: Request) {
 
         // Google検索グラウンディング付きで実行
         const response = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: "gemini-3.8-flash",
           contents,
           config: {
             systemInstruction: HAYATO_SYSTEM_PROMPT,
