@@ -33,7 +33,6 @@ export async function POST(req: Request) {
     const rawKey = process.env.GROQ_API_KEY || "";
     const groqKey = rawKey.trim();
 
-    // 1. キーの存在チェック
     if (!groqKey) {
       return NextResponse.json(
         { error: "GROQ_API_KEY が未登録です。VercelのEnvironment Variablesに登録してください。" },
@@ -41,10 +40,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2. キーの形式チェック（hayato などが入っているのを検知）
     if (!groqKey.startsWith("gsk_")) {
       return NextResponse.json(
-        { error: `キーが無効です（現在: "${groqKey.slice(0, 8)}..."）。Groqのキーは必ず「gsk_」から始まる長い英数字である必要があります！` },
+        { error: `キーが無効です（現在: "${groqKey.slice(0, 8)}..."）。Groqのキーは必ず「gsk_」から始まる必要があります！` },
         { status: 500 }
       );
     }
@@ -75,35 +73,50 @@ export async function POST(req: Request) {
       });
     }
 
-    // Groq API 呼び出し
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${groqKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "llama-3.1-8b-instant",
-        messages,
-        temperature: 0.7,
-        max_tokens: 300,
-      }),
-    });
+    // 現在Groqで稼働している候補モデル（自動フォールバック順）
+    const candidateModels = [
+      "openai/gpt-oss-20b",
+      "openai/gpt-oss-120b",
+      "qwen/qwen3.8-27b",
+      "llama3-8b-8192",
+    ];
 
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => null);
-      const groqMsg = errJson?.error?.message || (await res.text().catch(() => "不明なエラー"));
-      console.error("Groq API error:", res.status, groqMsg);
-      return NextResponse.json(
-        { error: `Groq通信エラー(${res.status}): ${groqMsg}` },
-        { status: res.status }
-      );
+    let lastErrorMsg = "";
+    let reply = "";
+
+    // 利用可能なモデルが見つかるまで自動で試行
+    for (const modelName of candidateModels) {
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${groqKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages,
+          temperature: 0.7,
+          max_tokens: 300,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        reply = data.choices?.[0]?.message?.content || "";
+        if (reply) break;
+      } else {
+        const errJson = await res.json().catch(() => null);
+        lastErrorMsg = errJson?.error?.message || `Status ${res.status}`;
+        console.warn(`Model ${modelName} failed, trying next...:`, lastErrorMsg);
+      }
     }
 
-    const data = await res.json();
-    const reply =
-      data.choices?.[0]?.message?.content ||
-      "すまん、通信データが一瞬途切れた。もう一度言ってくれ。";
+    if (!reply) {
+      return NextResponse.json(
+        { error: `Groq通信エラー: ${lastErrorMsg}` },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ reply });
   } catch (err: unknown) {
