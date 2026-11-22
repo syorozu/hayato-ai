@@ -10,9 +10,9 @@ const HAYATO_SYSTEM_PROMPT = `
 - 頭の回転が速く、少し自信家で生意気だが、頼りになる相棒。
 - 音声読み上げのため、返答は2〜3文（長くても4文程度）でテンポよく簡潔に話すこと。
 
-【Google検索による裏取り（ハルシネーション防止）】
-- 最新情報、VIVANTの作戦や登場人物、一般的な知識について質問されたら、Google検索ツールを使って事実関係を正確に裏取りしてから回答すること。
-- 嘘や適当なでっち上げは厳禁。「ちょっとWebを照合したぜ」「俺の検索網によれば〜だな」などとハヤトらしく事実を報告すること。
+【事実性の重視】
+- VIVANTの作戦や登場人物、一般的な知識について質問されたら、正確な事実関係を基に回答すること。
+- 嘘や適当なでっち上げは厳禁。事実に基づきハヤトらしくシャープに報告すること。
 `;
 
 export async function POST(req: Request) {
@@ -29,36 +29,32 @@ export async function POST(req: Request) {
 
     const geminiKey = (process.env.GEMINI_API_KEY || "").trim();
     let reply = "";
-    let geminiErrorMsg = "";
 
-    // 1. Google検索グラウンディング付きの Gemini 3.8 Flash
+    // 1. Google検索付きの Gemini 3.8 Flash（データ軽量化版）
     if (geminiKey) {
       try {
         const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-        // 会話履歴を整形（userとmodelが必ず交互になるように保証して400エラーを防ぐ）
+        // ★重要：429（データ上限オーバー）を防ぐため、履歴は直近の2往復のみコンパクトに保持！
         const contents: any[] = [];
         let lastRole = "";
 
         if (Array.isArray(history)) {
-          for (const h of history.slice(-8)) {
+          for (const h of history.slice(-4)) {
             if (!h || !h.content) continue;
             const currentRole = h.role === "assistant" ? "model" : "user";
-            // 同じ役が2回連続しないようにガード
             if (currentRole === lastRole) continue;
 
             contents.push({
               role: currentRole,
-              parts: [{ text: h.content }],
+              parts: [{ text: h.content.slice(0, 250) }],
             });
             lastRole = currentRole;
           }
         }
 
-        // 最新メッセージを追加（末尾がuserになるように調整）
         const userText = message || "自己紹介してくれ";
         if (contents.length > 0 && contents[contents.length - 1].role === "user") {
-          // すでに末尾がuserなら内容を更新
           contents[contents.length - 1].parts = [{ text: userText }];
         } else {
           contents.push({
@@ -67,7 +63,6 @@ export async function POST(req: Request) {
           });
         }
 
-        // Google検索グラウンディング付きで実行
         const response = await ai.models.generateContent({
           model: "gemini-3.8-flash",
           contents,
@@ -82,53 +77,55 @@ export async function POST(req: Request) {
           reply = response.text;
         }
       } catch (geminiErr: any) {
-        geminiErrorMsg = geminiErr?.message || String(geminiErr);
-        console.warn("Gemini with search failed, falling back:", geminiErrorMsg);
+        console.warn("Gemini rate limit or error, switching to Groq backup:", geminiErr?.message);
       }
     }
 
-    // 2. 万が一Geminiでエラーが出た場合のGroq自動バックアップ
+    // 2. Geminiが429制限等になった場合、即座にGroq（openai/gpt-oss-20b）が自動肩代わり！
     if (!reply && process.env.GROQ_API_KEY) {
       try {
-        const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.GROQ_API_KEY.trim()}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "llama-3.1-8b-instant",
-            messages: [
-              { role: "system", content: HAYATO_SYSTEM_PROMPT },
-              { role: "user", content: message || "状況を報告してくれ" },
-            ],
-            temperature: 0.2,
-            max_tokens: 280,
-          }),
-        });
-        if (groqRes.ok) {
-          const groqData = await groqRes.json();
-          reply = groqData.choices?.[0]?.message?.content || "";
+        const groqKey = process.env.GROQ_API_KEY.trim();
+        const candidateModels = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+
+        for (const model of candidateModels) {
+          const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${groqKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model,
+              messages: [
+                { role: "system", content: HAYATO_SYSTEM_PROMPT },
+                { role: "user", content: message || "状況を報告してくれ" },
+              ],
+              temperature: 0.2,
+              max_tokens: 280,
+            }),
+          });
+
+          if (groqRes.ok) {
+            const groqData = await groqRes.json();
+            reply = groqData.choices?.[0]?.message?.content || "";
+            if (reply) break;
+          }
         }
       } catch (groqErr) {
-        console.error("Groq fallback failed:", groqErr);
+        console.error("Groq fallback error:", groqErr);
       }
     }
 
+    // 3. 万が一両方とも混雑していた場合でも、赤いエラー画面を出さずにハヤトが声で案内！
     if (!reply) {
-      return NextResponse.json(
-        { error: `解析エラー: ${geminiErrorMsg || "通信が途切れました。もう一度話しかけてください。"}` },
-        { status: 500 }
-      );
+      reply = "極秘回線のトラフィックが一時的に混雑しているようだ。10秒待ってから、もう一度指示をくれ。";
     }
 
     return NextResponse.json({ reply });
   } catch (err: unknown) {
     console.error("Talk route error:", err);
-    const detail = err instanceof Error ? err.message : String(err);
-    return NextResponse.json(
-      { error: `システムエラー: ${detail}` },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      reply: "通信衛星とのリンクを再同期中だ。司令官、もう一度話しかけてくれ。",
+    });
   }
 }
